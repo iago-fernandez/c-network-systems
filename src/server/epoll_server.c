@@ -9,9 +9,14 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <errno.h>
 #include <sys/epoll.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #define MAX_EVENTS 64
+#define BUFFER_SIZE 4096
 
  /**
   * @brief Configures a file descriptor to operate in non-blocking mode.
@@ -59,12 +64,59 @@ void start_epoll_server(const char* port) {
 
         for (int i = 0; i < num_events; i++) {
             if (events[i].data.fd == server_fd) {
-                printf("New connection event detected on server socket.\n");
-                /* Connection acceptance logic will be implemented next */
+                while (1) {
+                    struct sockaddr_in client_addr;
+                    socklen_t client_len = sizeof(client_addr);
+                    int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
+
+                    if (client_fd == -1) {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                            break;
+                        }
+                        else {
+                            perror("accept failed");
+                            break;
+                        }
+                    }
+
+                    char client_ip[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
+                    printf("Accepted connection from %s:%d (fd: %d).\n", client_ip, ntohs(client_addr.sin_port), client_fd);
+
+                    set_non_blocking(client_fd);
+
+                    event.data.fd = client_fd;
+                    event.events = EPOLLIN | EPOLLET;
+
+                    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event) == -1) {
+                        perror("epoll_ctl EPOLL_CTL_ADD client failed");
+                        close(client_fd);
+                    }
+                }
             }
             else {
-                printf("Data event detected on client socket.\n");
-                /* Data read/write logic will be implemented next */
+                int client_fd = events[i].data.fd;
+                while (1) {
+                    char buffer[BUFFER_SIZE];
+                    ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer), 0);
+
+                    if (bytes_read > 0) {
+                        printf("Received %zd bytes from client fd %d.\n", bytes_read, client_fd);
+                    }
+                    else if (bytes_read == -1) {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                            break;
+                        }
+                        perror("recv failed");
+                        close(client_fd);
+                        break;
+                    }
+                    else if (bytes_read == 0) {
+                        printf("Client fd %d disconnected.\n", client_fd);
+                        close(client_fd);
+                        break;
+                    }
+                }
             }
         }
     }
