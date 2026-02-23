@@ -1,8 +1,9 @@
 /**
  * @file epoll_server.c
- * @brief Implementation of the asynchronous epoll event loop.
+ * @brief Implementation of the asynchronous epoll event loop with context management.
  */
 #include "server/epoll_server.h"
+#include "server/client_context.h"
 #include "common/net_utils.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,7 +17,6 @@
 #include <arpa/inet.h>
 
 #define MAX_EVENTS 64
-#define BUFFER_SIZE 4096
 
  /**
   * @brief Configures a file descriptor to operate in non-blocking mode.
@@ -34,6 +34,91 @@ static void set_non_blocking(int fd) {
     }
 }
 
+/**
+ * @brief Handles data reading for a connected client using a state machine.
+ *
+ * @param ctx The client context containing the connection state.
+ */
+static void handle_client_data(ClientContext* ctx) {
+    ssize_t bytes_read;
+
+    while (1) {
+        if (ctx->state == STATE_READING_HEADER) {
+            size_t remaining = sizeof(ctx->header_buffer) - ctx->header_bytes_read;
+            bytes_read = recv(ctx->fd, ctx->header_buffer + ctx->header_bytes_read, remaining, 0);
+
+            if (bytes_read == -1) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                perror("recv header failed");
+                close(ctx->fd);
+                free_client_context(ctx);
+                free(ctx);
+                return;
+            }
+            else if (bytes_read == 0) {
+                printf("Client fd %d disconnected during header read.\n", ctx->fd);
+                close(ctx->fd);
+                free_client_context(ctx);
+                free(ctx);
+                return;
+            }
+
+            ctx->header_bytes_read += bytes_read;
+
+            if (ctx->header_bytes_read == sizeof(ctx->header_buffer)) {
+                ProtocolHeader header;
+                deserialize_header(ctx->header_buffer, &header);
+
+                ctx->expected_payload_length = header.payload_length;
+                ctx->message_type = header.message_type;
+
+                if (ctx->expected_payload_length > 0) {
+                    ctx->payload_buffer = (uint8_t*)malloc(ctx->expected_payload_length);
+                    if (!ctx->payload_buffer) {
+                        perror("malloc payload failed");
+                        close(ctx->fd);
+                        free(ctx);
+                        return;
+                    }
+                    ctx->state = STATE_READING_PAYLOAD;
+                }
+                else {
+                    printf("Received header-only message. Type: %d\n", ctx->message_type);
+                    reset_client_context(ctx);
+                }
+            }
+        }
+        else if (ctx->state == STATE_READING_PAYLOAD) {
+            size_t remaining = ctx->expected_payload_length - ctx->payload_bytes_read;
+            bytes_read = recv(ctx->fd, ctx->payload_buffer + ctx->payload_bytes_read, remaining, 0);
+
+            if (bytes_read == -1) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                perror("recv payload failed");
+                close(ctx->fd);
+                free_client_context(ctx);
+                free(ctx);
+                return;
+            }
+            else if (bytes_read == 0) {
+                printf("Client fd %d disconnected during payload read.\n", ctx->fd);
+                close(ctx->fd);
+                free_client_context(ctx);
+                free(ctx);
+                return;
+            }
+
+            ctx->payload_bytes_read += bytes_read;
+
+            if (ctx->payload_bytes_read == ctx->expected_payload_length) {
+                printf("Received message. Type: %d, Length: %d\n", ctx->message_type, ctx->expected_payload_length);
+                /* Business logic would be invoked here */
+                reset_client_context(ctx);
+            }
+        }
+    }
+}
+
 void start_epoll_server(const char* port) {
     int server_fd = setup_tcp_server_socket(port);
     set_non_blocking(server_fd);
@@ -43,18 +128,22 @@ void start_epoll_server(const char* port) {
         die_with_error("epoll_create1 failed");
     }
 
+    /* We wrap the server socket in a context to unify pointer handling in epoll */
+    ClientContext* server_ctx = (ClientContext*)malloc(sizeof(ClientContext));
+    init_client_context(server_ctx, server_fd);
+
     struct epoll_event event;
     struct epoll_event events[MAX_EVENTS];
 
     memset(&event, 0, sizeof(struct epoll_event));
-    event.data.fd = server_fd;
+    event.data.ptr = server_ctx;
     event.events = EPOLLIN | EPOLLET;
 
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event) == -1) {
         die_with_error("epoll_ctl EPOLL_CTL_ADD failed");
     }
 
-    printf("Server listening on port %s...\n", port);
+    printf("Server listening on port %s (Binary Protocol V1)...\n", port);
 
     while (1) {
         int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
@@ -63,7 +152,9 @@ void start_epoll_server(const char* port) {
         }
 
         for (int i = 0; i < num_events; i++) {
-            if (events[i].data.fd == server_fd) {
+            ClientContext* ctx = (ClientContext*)events[i].data.ptr;
+
+            if (ctx->fd == server_fd) {
                 while (1) {
                     struct sockaddr_in client_addr;
                     socklen_t client_len = sizeof(client_addr);
@@ -85,42 +176,26 @@ void start_epoll_server(const char* port) {
 
                     set_non_blocking(client_fd);
 
-                    event.data.fd = client_fd;
+                    ClientContext* new_client_ctx = (ClientContext*)malloc(sizeof(ClientContext));
+                    init_client_context(new_client_ctx, client_fd);
+
+                    event.data.ptr = new_client_ctx;
                     event.events = EPOLLIN | EPOLLET;
 
                     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event) == -1) {
                         perror("epoll_ctl EPOLL_CTL_ADD client failed");
                         close(client_fd);
+                        free(new_client_ctx);
                     }
                 }
             }
             else {
-                int client_fd = events[i].data.fd;
-                while (1) {
-                    char buffer[BUFFER_SIZE];
-                    ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer), 0);
-
-                    if (bytes_read > 0) {
-                        printf("Received %zd bytes from client fd %d.\n", bytes_read, client_fd);
-                    }
-                    else if (bytes_read == -1) {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                            break;
-                        }
-                        perror("recv failed");
-                        close(client_fd);
-                        break;
-                    }
-                    else if (bytes_read == 0) {
-                        printf("Client fd %d disconnected.\n", client_fd);
-                        close(client_fd);
-                        break;
-                    }
-                }
+                handle_client_data(ctx);
             }
         }
     }
 
+    free(server_ctx);
     close(server_fd);
     close(epoll_fd);
 }
