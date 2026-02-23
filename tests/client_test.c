@@ -39,16 +39,17 @@ int main(void) {
     printf("Connected to server.\n");
 
     // Prepare the payload data
-    const char* message_data = "Hello, High Performance Server!";
+    const char* message_data = "Testing PacketHeader structure.";
     uint32_t data_len = (uint32_t)strlen(message_data);
 
-    ProtocolHeader header;
+    PacketHeader header;
+    header.version = PROTOCOL_VERSION_1;
+    header.type = PACKET_TYPE_DATA;
+    header.sequence_number = 1;
     header.payload_length = data_len;
-    header.message_type = MSG_TYPE_DATA;
-    header.version = PROTOCOL_VERSION;
 
-    // Serialize header to network byte order
-    uint8_t buffer[8];
+    // Serialize header (12 bytes)
+    uint8_t buffer[sizeof(PacketHeader)];
     serialize_header(&header, buffer);
 
     // Send the fixed-size header
@@ -57,7 +58,7 @@ int main(void) {
         close(sock_fd);
         return 1;
     }
-    printf("Header sent (Len: %d, Type: %d).\n", data_len, header.message_type);
+    printf("Header sent (Type: %d, Seq: %d, Len: %d).\n", header.type, header.sequence_number, header.payload_length);
 
     // Send the payload body
     if (send(sock_fd, message_data, data_len, 0) != (ssize_t)data_len) {

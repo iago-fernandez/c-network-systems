@@ -5,6 +5,7 @@
 #include "server/epoll_server.h"
 #include "server/client_context.h"
 #include "common/net_utils.h"
+#include "protocol/protocol.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,11 +19,7 @@
 
 #define MAX_EVENTS 64
 
- /**
-  * @brief Configures a file descriptor to operate in non-blocking mode.
-  *
-  * @param fd The file descriptor to modify.
-  */
+ // Configures a file descriptor to operate in non-blocking mode.
 static void set_non_blocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags == -1) {
@@ -34,11 +31,7 @@ static void set_non_blocking(int fd) {
     }
 }
 
-/**
- * @brief Handles data reading for a connected client using a state machine.
- *
- * @param ctx The client context containing the connection state.
- */
+// Handles data reading for a connected client using a state machine.
 static void handle_client_data(ClientContext* ctx) {
     ssize_t bytes_read;
 
@@ -66,13 +59,23 @@ static void handle_client_data(ClientContext* ctx) {
             ctx->header_bytes_read += bytes_read;
 
             if (ctx->header_bytes_read == sizeof(ctx->header_buffer)) {
-                ProtocolHeader header;
+                // Deserialize using the new PacketHeader structure
+                PacketHeader header;
                 deserialize_header(ctx->header_buffer, &header);
 
                 ctx->expected_payload_length = header.payload_length;
-                ctx->message_type = header.message_type;
+                ctx->message_type = header.type;
 
                 if (ctx->expected_payload_length > 0) {
+                    // Safety check for max payload size (optional but recommended)
+                    if (ctx->expected_payload_length > MAX_PAYLOAD_SIZE) {
+                        fprintf(stderr, "Payload too large: %d\n", ctx->expected_payload_length);
+                        close(ctx->fd);
+                        free_client_context(ctx);
+                        free(ctx);
+                        return;
+                    }
+
                     ctx->payload_buffer = (uint8_t*)malloc(ctx->expected_payload_length);
                     if (!ctx->payload_buffer) {
                         perror("malloc payload failed");
@@ -83,7 +86,7 @@ static void handle_client_data(ClientContext* ctx) {
                     ctx->state = STATE_READING_PAYLOAD;
                 }
                 else {
-                    printf("Received header-only message. Type: %d\n", ctx->message_type);
+                    printf("Received header-only message. Type: %d, Seq: %d\n", header.type, header.sequence_number);
                     reset_client_context(ctx);
                 }
             }
@@ -112,7 +115,7 @@ static void handle_client_data(ClientContext* ctx) {
 
             if (ctx->payload_bytes_read == ctx->expected_payload_length) {
                 printf("Received message. Type: %d, Length: %d\n", ctx->message_type, ctx->expected_payload_length);
-                /* Business logic would be invoked here */
+                // Business logic would be invoked here
                 reset_client_context(ctx);
             }
         }
@@ -128,7 +131,7 @@ void start_epoll_server(const char* port) {
         die_with_error("epoll_create1 failed");
     }
 
-    /* We wrap the server socket in a context to unify pointer handling in epoll */
+    // We wrap the server socket in a context to unify pointer handling in epoll
     ClientContext* server_ctx = (ClientContext*)malloc(sizeof(ClientContext));
     init_client_context(server_ctx, server_fd);
 

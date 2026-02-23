@@ -7,7 +7,7 @@ TEST_DIR = tests
 BUILD_DIR = build
 
 # Source discovery
-# Find all sources in src/ except main.c
+# Find all sources in src/ EXCEPT main.c (server entry point)
 COMMON_SOURCES = $(filter-out $(SRC_DIR)/main.c, $(shell find $(SRC_DIR) -name '*.c'))
 COMMON_OBJECTS = $(patsubst $(SRC_DIR)/%.c, $(BUILD_DIR)/%.o, $(COMMON_SOURCES))
 
@@ -27,11 +27,11 @@ all: directories $(SERVER_TARGET) $(CLIENT_TEST_TARGET)
 directories:
 	@mkdir -p $(BUILD_DIR)
 
-# Build the network server
+# Build the Network Server
 $(SERVER_TARGET): $(COMMON_OBJECTS) $(SERVER_MAIN)
 	$(CC) $(CFLAGS) -o $@ $^
 
-# Build the test client
+# Build the Test Client
 $(CLIENT_TEST_TARGET): $(COMMON_OBJECTS) $(CLIENT_TEST_MAIN)
 	$(CC) $(CFLAGS) -o $@ $^
 

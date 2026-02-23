@@ -25,7 +25,8 @@ typedef struct {
     int fd;
     ClientState state;
 
-    uint8_t header_buffer[8];
+    // Buffer size must match PacketHeader size (12 bytes)
+    uint8_t header_buffer[sizeof(PacketHeader)];
     size_t header_bytes_read;
 
     uint8_t* payload_buffer;
