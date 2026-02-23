@@ -24,6 +24,7 @@ typedef enum {
 /**
  * @struct PacketHeader
  * @brief Header for all protocol packets. Packed to prevent compiler padding.
+ * Size: 2 + 2 + 4 + 4 = 12 bytes.
  */
 typedef struct __attribute__((packed)) {
     uint16_t version;
@@ -40,5 +41,9 @@ typedef struct __attribute__((packed)) {
     PacketHeader header;
     uint8_t payload[MAX_PAYLOAD_SIZE];
 } DataPacket;
+
+// Function prototypes for serialization
+void serialize_header(const PacketHeader* header, uint8_t* buffer);
+void deserialize_header(const uint8_t* buffer, PacketHeader* header);
 
 #endif
