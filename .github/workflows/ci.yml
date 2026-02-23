@@ -1,0 +1,38 @@
+name: C Network Engine CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential gcc make
+
+    - name: Compile Project
+      run: make
+
+    - name: Run Integration Test
+      run: |
+        # Start the server in the background
+        ./build/network_server &
+        SERVER_PID=$!
+        
+        # Wait for the server to bind the port
+        sleep 2
+        
+        # Run the test client to verify the binary protocol
+        ./build/client_test
+        
+        # Cleanup
+        kill $SERVER_PID
