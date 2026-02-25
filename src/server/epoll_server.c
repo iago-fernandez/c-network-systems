@@ -6,7 +6,7 @@
 #include "server/client_context.h"
 #include "common/net_utils.h"
 #include "protocol/protocol.h"
-#include "common/logger.h" // Added logger include
+#include "common/logger.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +19,7 @@
 #include <arpa/inet.h>
 
 #define MAX_EVENTS 64
+#define CMD_ECHO 0x02
 
  // Configures a file descriptor to operate in non-blocking mode.
 static void set_non_blocking(int fd) {
@@ -29,6 +30,27 @@ static void set_non_blocking(int fd) {
 
     if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
         die_with_error("fcntl F_SETFL failed");
+    }
+}
+
+// Helper function to serialize and send a response packet.
+static void send_response(int fd, uint8_t type, const uint8_t* payload, uint32_t payload_len) {
+    PacketHeader header;
+    header.type = type;
+    header.sequence_number = 0;
+    header.payload_length = payload_len;
+
+    ssize_t sent = send(fd, &header, sizeof(header), 0);
+    if (sent == -1) {
+        LOG_ERROR("Failed to send response header: %s", strerror(errno));
+        return;
+    }
+
+    if (payload_len > 0 && payload != NULL) {
+        sent = send(fd, payload, payload_len, 0);
+        if (sent == -1) {
+            LOG_ERROR("Failed to send response payload: %s", strerror(errno));
+        }
     }
 }
 
@@ -85,7 +107,7 @@ static void handle_client_data(ClientContext* ctx) {
                     ctx->state = STATE_READING_PAYLOAD;
                 }
                 else {
-                    LOG_DEBUG("Received header-only message. Type: %d, Seq: %d", header.type, header.sequence_number);
+                    LOG_DEBUG("Received header-only message. Type: %d", header.type);
                     reset_client_context(ctx);
                 }
             }
@@ -113,8 +135,18 @@ static void handle_client_data(ClientContext* ctx) {
             ctx->payload_bytes_read += bytes_read;
 
             if (ctx->payload_bytes_read == ctx->expected_payload_length) {
-                LOG_INFO("Received message. Type: %d, Length: %d", ctx->message_type, ctx->expected_payload_length);
-                // Business logic will be invoked here
+                LOG_INFO("Processing command type: %d, Length: %d", ctx->message_type, ctx->expected_payload_length);
+
+                switch (ctx->message_type) {
+                case CMD_ECHO:
+                    LOG_INFO("Executing ECHO command.");
+                    send_response(ctx->fd, CMD_ECHO, ctx->payload_buffer, ctx->expected_payload_length);
+                    break;
+                default:
+                    LOG_WARN("Unknown command type: %d", ctx->message_type);
+                    break;
+                }
+
                 reset_client_context(ctx);
             }
         }
