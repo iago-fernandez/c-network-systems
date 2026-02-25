@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -O3 -I./include
+CFLAGS = -Wall -Wextra -O3 -I./include -D_POSIX_C_SOURCE=200809L
 
 # Directories
 SRC_DIR = src
