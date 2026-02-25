@@ -21,7 +21,7 @@
 #define MAX_EVENTS 64
 #define CMD_ECHO 0x02
 
- // Configures a file descriptor to operate in non-blocking mode.
+ // Configures a file descriptor to operate in non-blocking mode
 static void set_non_blocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags == -1) {
@@ -33,14 +33,18 @@ static void set_non_blocking(int fd) {
     }
 }
 
-// Helper function to serialize and send a response packet.
+// Helper function to serialize and send a response packet
 static void send_response(int fd, uint8_t type, const uint8_t* payload, uint32_t payload_len) {
     PacketHeader header;
     header.type = type;
     header.sequence_number = 0;
     header.payload_length = payload_len;
 
-    ssize_t sent = send(fd, &header, sizeof(header), 0);
+    // Serialize header to Network Byte Order before sending
+    uint8_t header_buffer[sizeof(PacketHeader)];
+    serialize_header(&header, header_buffer);
+
+    ssize_t sent = send(fd, header_buffer, sizeof(header_buffer), 0);
     if (sent == -1) {
         LOG_ERROR("Failed to send response header: %s", strerror(errno));
         return;
@@ -54,7 +58,7 @@ static void send_response(int fd, uint8_t type, const uint8_t* payload, uint32_t
     }
 }
 
-// Handles data reading for a connected client using a state machine.
+// Handles data reading for a connected client using a state machine
 static void handle_client_data(ClientContext* ctx) {
     ssize_t bytes_read;
 
