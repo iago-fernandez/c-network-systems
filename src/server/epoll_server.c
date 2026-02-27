@@ -7,7 +7,6 @@
 #include "common/net_utils.h"
 #include "protocol/protocol.h"
 #include "common/logger.h"
-#include "server/signal_handler.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,7 +21,7 @@
 #define MAX_EVENTS 64
 #define CMD_ECHO 0x02
 
- // Configures a file descriptor to operate in non-blocking mode.
+ // Configures a file descriptor to operate in non-blocking mode
 static void set_non_blocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags == -1) {
@@ -34,13 +33,14 @@ static void set_non_blocking(int fd) {
     }
 }
 
-// Serializes and sends a response packet to the client.
+// Helper function to serialize and send a response packet
 static void send_response(int fd, uint8_t type, const uint8_t* payload, uint32_t payload_len) {
     PacketHeader header;
     header.type = type;
     header.sequence_number = 0;
     header.payload_length = payload_len;
 
+    // Serialize header to Network Byte Order before sending
     uint8_t header_buffer[sizeof(PacketHeader)];
     serialize_header(&header, header_buffer);
 
@@ -58,7 +58,7 @@ static void send_response(int fd, uint8_t type, const uint8_t* payload, uint32_t
     }
 }
 
-// Handles data reading for a connected client using a state machine.
+// Handles data reading for a connected client using a state machine
 static void handle_client_data(ClientContext* ctx) {
     ssize_t bytes_read;
 
@@ -182,12 +182,9 @@ void start_epoll_server(const char* port) {
 
     LOG_INFO("Server listening on port %s (Binary Protocol V1)...", port);
 
-    while (server_running) {
+    while (1) {
         int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
         if (num_events == -1) {
-            if (errno == EINTR) {
-                continue;
-            }
             die_with_error("epoll_wait failed");
         }
 
@@ -235,9 +232,7 @@ void start_epoll_server(const char* port) {
         }
     }
 
-    LOG_INFO("Initiating graceful shutdown sequence...");
     free(server_ctx);
     close(server_fd);
     close(epoll_fd);
-    LOG_INFO("Server resources released cleanly.");
 }

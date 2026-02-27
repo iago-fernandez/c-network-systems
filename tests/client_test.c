@@ -31,6 +31,7 @@ int main(void) {
         return 1;
     }
 
+    // Establish connection to the server
     if (connect(sock_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
         perror("[TEST] Connection failed");
         return 1;
@@ -88,7 +89,7 @@ int main(void) {
         printf("[TEST] Failure! Payload mismatch.\n");
     }
 
-    free(resp_payload);
+    // Cleanup resources
     close(sock_fd);
     return 0;
 }
