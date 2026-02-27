@@ -6,6 +6,8 @@
 #include "server/client_context.h"
 #include "common/net_utils.h"
 #include "protocol/protocol.h"
+#include "common/logger.h"
+#include "server/signal_handler.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +20,7 @@
 #include <arpa/inet.h>
 
 #define MAX_EVENTS 64
+#define CMD_ECHO 0x02
 
  // Configures a file descriptor to operate in non-blocking mode.
 static void set_non_blocking(int fd) {
@@ -28,6 +31,30 @@ static void set_non_blocking(int fd) {
 
     if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
         die_with_error("fcntl F_SETFL failed");
+    }
+}
+
+// Serializes and sends a response packet to the client.
+static void send_response(int fd, uint8_t type, const uint8_t* payload, uint32_t payload_len) {
+    PacketHeader header;
+    header.type = type;
+    header.sequence_number = 0;
+    header.payload_length = payload_len;
+
+    uint8_t header_buffer[sizeof(PacketHeader)];
+    serialize_header(&header, header_buffer);
+
+    ssize_t sent = send(fd, header_buffer, sizeof(header_buffer), 0);
+    if (sent == -1) {
+        LOG_ERROR("Failed to send response header: %s", strerror(errno));
+        return;
+    }
+
+    if (payload_len > 0 && payload != NULL) {
+        sent = send(fd, payload, payload_len, 0);
+        if (sent == -1) {
+            LOG_ERROR("Failed to send response payload: %s", strerror(errno));
+        }
     }
 }
 
@@ -42,14 +69,14 @@ static void handle_client_data(ClientContext* ctx) {
 
             if (bytes_read == -1) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-                perror("recv header failed");
+                LOG_ERROR("recv header failed: %s", strerror(errno));
                 close(ctx->fd);
                 free_client_context(ctx);
                 free(ctx);
                 return;
             }
             else if (bytes_read == 0) {
-                printf("Client fd %d disconnected during header read.\n", ctx->fd);
+                LOG_INFO("Client fd %d disconnected during header read.", ctx->fd);
                 close(ctx->fd);
                 free_client_context(ctx);
                 free(ctx);
@@ -59,7 +86,6 @@ static void handle_client_data(ClientContext* ctx) {
             ctx->header_bytes_read += bytes_read;
 
             if (ctx->header_bytes_read == sizeof(ctx->header_buffer)) {
-                // Deserialize using the new PacketHeader structure
                 PacketHeader header;
                 deserialize_header(ctx->header_buffer, &header);
 
@@ -67,9 +93,8 @@ static void handle_client_data(ClientContext* ctx) {
                 ctx->message_type = header.type;
 
                 if (ctx->expected_payload_length > 0) {
-                    // Safety check for max payload size (optional but recommended)
                     if (ctx->expected_payload_length > MAX_PAYLOAD_SIZE) {
-                        fprintf(stderr, "Payload too large: %d\n", ctx->expected_payload_length);
+                        LOG_WARN("Payload too large: %d", ctx->expected_payload_length);
                         close(ctx->fd);
                         free_client_context(ctx);
                         free(ctx);
@@ -78,7 +103,7 @@ static void handle_client_data(ClientContext* ctx) {
 
                     ctx->payload_buffer = (uint8_t*)malloc(ctx->expected_payload_length);
                     if (!ctx->payload_buffer) {
-                        perror("malloc payload failed");
+                        LOG_ERROR("malloc payload failed: %s", strerror(errno));
                         close(ctx->fd);
                         free(ctx);
                         return;
@@ -86,7 +111,7 @@ static void handle_client_data(ClientContext* ctx) {
                     ctx->state = STATE_READING_PAYLOAD;
                 }
                 else {
-                    printf("Received header-only message. Type: %d, Seq: %d\n", header.type, header.sequence_number);
+                    LOG_DEBUG("Received header-only message. Type: %d", header.type);
                     reset_client_context(ctx);
                 }
             }
@@ -97,14 +122,14 @@ static void handle_client_data(ClientContext* ctx) {
 
             if (bytes_read == -1) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-                perror("recv payload failed");
+                LOG_ERROR("recv payload failed: %s", strerror(errno));
                 close(ctx->fd);
                 free_client_context(ctx);
                 free(ctx);
                 return;
             }
             else if (bytes_read == 0) {
-                printf("Client fd %d disconnected during payload read.\n", ctx->fd);
+                LOG_INFO("Client fd %d disconnected during payload read.", ctx->fd);
                 close(ctx->fd);
                 free_client_context(ctx);
                 free(ctx);
@@ -114,8 +139,18 @@ static void handle_client_data(ClientContext* ctx) {
             ctx->payload_bytes_read += bytes_read;
 
             if (ctx->payload_bytes_read == ctx->expected_payload_length) {
-                printf("Received message. Type: %d, Length: %d\n", ctx->message_type, ctx->expected_payload_length);
-                // Business logic would be invoked here
+                LOG_INFO("Processing command type: %d, Length: %d", ctx->message_type, ctx->expected_payload_length);
+
+                switch (ctx->message_type) {
+                case CMD_ECHO:
+                    LOG_INFO("Executing ECHO command.");
+                    send_response(ctx->fd, CMD_ECHO, ctx->payload_buffer, ctx->expected_payload_length);
+                    break;
+                default:
+                    LOG_WARN("Unknown command type: %d", ctx->message_type);
+                    break;
+                }
+
                 reset_client_context(ctx);
             }
         }
@@ -131,7 +166,6 @@ void start_epoll_server(const char* port) {
         die_with_error("epoll_create1 failed");
     }
 
-    // We wrap the server socket in a context to unify pointer handling in epoll
     ClientContext* server_ctx = (ClientContext*)malloc(sizeof(ClientContext));
     init_client_context(server_ctx, server_fd);
 
@@ -146,11 +180,14 @@ void start_epoll_server(const char* port) {
         die_with_error("epoll_ctl EPOLL_CTL_ADD failed");
     }
 
-    printf("Server listening on port %s (Binary Protocol V1)...\n", port);
+    LOG_INFO("Server listening on port %s (Binary Protocol V1)...", port);
 
-    while (1) {
+    while (server_running) {
         int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
         if (num_events == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
             die_with_error("epoll_wait failed");
         }
 
@@ -168,14 +205,14 @@ void start_epoll_server(const char* port) {
                             break;
                         }
                         else {
-                            perror("accept failed");
+                            LOG_ERROR("accept failed: %s", strerror(errno));
                             break;
                         }
                     }
 
                     char client_ip[INET_ADDRSTRLEN];
                     inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
-                    printf("Accepted connection from %s:%d (fd: %d).\n", client_ip, ntohs(client_addr.sin_port), client_fd);
+                    LOG_INFO("Accepted connection from %s:%d (fd: %d).", client_ip, ntohs(client_addr.sin_port), client_fd);
 
                     set_non_blocking(client_fd);
 
@@ -186,7 +223,7 @@ void start_epoll_server(const char* port) {
                     event.events = EPOLLIN | EPOLLET;
 
                     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event) == -1) {
-                        perror("epoll_ctl EPOLL_CTL_ADD client failed");
+                        LOG_ERROR("epoll_ctl EPOLL_CTL_ADD client failed: %s", strerror(errno));
                         close(client_fd);
                         free(new_client_ctx);
                     }
@@ -198,7 +235,9 @@ void start_epoll_server(const char* port) {
         }
     }
 
+    LOG_INFO("Initiating graceful shutdown sequence...");
     free(server_ctx);
     close(server_fd);
     close(epoll_fd);
+    LOG_INFO("Server resources released cleanly.");
 }
