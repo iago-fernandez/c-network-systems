@@ -22,7 +22,6 @@
 
 #define MAX_EVENTS 64
 #define CMD_ECHO 0x02
-#define THREAD_COUNT 4
 #define QUEUE_SIZE 1024
 
 static ThreadPool* global_pool = NULL;
@@ -68,7 +67,6 @@ static void send_response(int fd, uint8_t type, const uint8_t* payload, uint32_t
     }
 }
 
-// Worker thread routine to execute business logic
 static void execute_command_task(void* arg) {
     CommandTask* task = (CommandTask*)arg;
 
@@ -196,7 +194,13 @@ static void handle_client_data(ClientContext* ctx) {
 }
 
 void start_epoll_server(const char* port) {
-    global_pool = thread_pool_create(THREAD_COUNT, QUEUE_SIZE);
+    long core_count = sysconf(_SC_NPROCESSORS_ONLN);
+    if (core_count < 1) {
+        LOG_WARN("Failed to detect CPU cores. Defaulting to 4 workers.");
+        core_count = 4;
+    }
+
+    global_pool = thread_pool_create((uint32_t)core_count, QUEUE_SIZE);
     if (global_pool == NULL) {
         die_with_error("Failed to initialize thread pool");
     }
@@ -224,7 +228,7 @@ void start_epoll_server(const char* port) {
     }
 
     LOG_INFO("Server listening on port %s (Binary Protocol V1)...", port);
-    LOG_INFO("Thread pool initialized with %d workers.", THREAD_COUNT);
+    LOG_INFO("Thread pool initialized with %ld workers.", core_count);
 
     while (server_running) {
         int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);

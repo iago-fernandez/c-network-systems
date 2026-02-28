@@ -11,12 +11,17 @@
 #include <sys/socket.h>
 
 #define SERVER_IP "127.0.0.1"
-#define SERVER_PORT 8080
 #define CMD_ECHO 0x02
 
-int main(void) {
+int main(int argc, char* argv[]) {
     int sock_fd;
     struct sockaddr_in server_addr;
+    const char* port_str = "8080";
+
+    if (argc > 1) {
+        port_str = argv[1];
+    }
+    int server_port = atoi(port_str);
 
     sock_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (sock_fd < 0) {
@@ -25,18 +30,17 @@ int main(void) {
     }
 
     server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(SERVER_PORT);
+    server_addr.sin_port = htons(server_port);
     if (inet_pton(AF_INET, SERVER_IP, &server_addr.sin_addr) <= 0) {
         perror("[TEST] Invalid address/ Address not supported");
         return 1;
     }
 
-    // Establish connection to the server
     if (connect(sock_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
         perror("[TEST] Connection failed");
         return 1;
     }
-    printf("[TEST] Connected to server.\n");
+    printf("[TEST] Connected to server on port %d.\n", server_port);
 
     const char* message_data = "Integration Check: Bidirectional Flow";
     uint32_t data_len = (uint32_t)strlen(message_data);
@@ -89,7 +93,7 @@ int main(void) {
         printf("[TEST] Failure! Payload mismatch.\n");
     }
 
-    // Cleanup resources
+    free(resp_payload);
     close(sock_fd);
     return 0;
 }
