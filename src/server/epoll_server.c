@@ -1,6 +1,6 @@
 /**
  * @file epoll_server.c
- * @brief Implementation of the asynchronous epoll event loop with context management.
+ * @brief Implementation of the asynchronous epoll event loop with context management and thread pool dispatching.
  */
 #include "server/epoll_server.h"
 #include "server/client_context.h"
@@ -8,6 +8,7 @@
 #include "protocol/protocol.h"
 #include "common/logger.h"
 #include "server/signal_handler.h"
+#include "server/thread_pool.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,8 +22,18 @@
 
 #define MAX_EVENTS 64
 #define CMD_ECHO 0x02
+#define THREAD_COUNT 4
+#define QUEUE_SIZE 1024
 
- // Configures a file descriptor to operate in non-blocking mode.
+static ThreadPool* global_pool = NULL;
+
+typedef struct {
+    int fd;
+    uint8_t type;
+    uint8_t* payload;
+    uint32_t payload_len;
+} CommandTask;
+
 static void set_non_blocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags == -1) {
@@ -34,7 +45,6 @@ static void set_non_blocking(int fd) {
     }
 }
 
-// Helper function to serialize and send a response packet.
 static void send_response(int fd, uint8_t type, const uint8_t* payload, uint32_t payload_len) {
     PacketHeader header;
     header.type = type;
@@ -58,7 +68,26 @@ static void send_response(int fd, uint8_t type, const uint8_t* payload, uint32_t
     }
 }
 
-// Handles data reading for a connected client using a state machine.
+// Worker thread routine to execute business logic
+static void execute_command_task(void* arg) {
+    CommandTask* task = (CommandTask*)arg;
+
+    switch (task->type) {
+    case CMD_ECHO:
+        LOG_INFO("Executing ECHO command in worker thread.");
+        send_response(task->fd, CMD_ECHO, task->payload, task->payload_len);
+        break;
+    default:
+        LOG_WARN("Unknown command type dispatched: %d", task->type);
+        break;
+    }
+
+    if (task->payload != NULL) {
+        free(task->payload);
+    }
+    free(task);
+}
+
 static void handle_client_data(ClientContext* ctx) {
     ssize_t bytes_read;
 
@@ -139,16 +168,25 @@ static void handle_client_data(ClientContext* ctx) {
             ctx->payload_bytes_read += bytes_read;
 
             if (ctx->payload_bytes_read == ctx->expected_payload_length) {
-                LOG_INFO("Processing command type: %d, Length: %d", ctx->message_type, ctx->expected_payload_length);
+                LOG_INFO("Dispatching command type: %d to thread pool", ctx->message_type);
 
-                switch (ctx->message_type) {
-                case CMD_ECHO:
-                    LOG_INFO("Executing ECHO command.");
-                    send_response(ctx->fd, CMD_ECHO, ctx->payload_buffer, ctx->expected_payload_length);
-                    break;
-                default:
-                    LOG_WARN("Unknown command type: %d", ctx->message_type);
-                    break;
+                CommandTask* task = (CommandTask*)malloc(sizeof(CommandTask));
+                if (task != NULL) {
+                    task->fd = ctx->fd;
+                    task->type = ctx->message_type;
+                    task->payload_len = ctx->expected_payload_length;
+                    task->payload = NULL;
+
+                    if (task->payload_len > 0) {
+                        task->payload = (uint8_t*)malloc(task->payload_len);
+                        memcpy(task->payload, ctx->payload_buffer, task->payload_len);
+                    }
+
+                    if (thread_pool_add_task(global_pool, execute_command_task, task) != 0) {
+                        LOG_ERROR("Failed to add task to thread pool queue.");
+                        if (task->payload != NULL) free(task->payload);
+                        free(task);
+                    }
                 }
 
                 reset_client_context(ctx);
@@ -158,6 +196,11 @@ static void handle_client_data(ClientContext* ctx) {
 }
 
 void start_epoll_server(const char* port) {
+    global_pool = thread_pool_create(THREAD_COUNT, QUEUE_SIZE);
+    if (global_pool == NULL) {
+        die_with_error("Failed to initialize thread pool");
+    }
+
     int server_fd = setup_tcp_server_socket(port);
     set_non_blocking(server_fd);
 
@@ -181,6 +224,7 @@ void start_epoll_server(const char* port) {
     }
 
     LOG_INFO("Server listening on port %s (Binary Protocol V1)...", port);
+    LOG_INFO("Thread pool initialized with %d workers.", THREAD_COUNT);
 
     while (server_running) {
         int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
@@ -236,6 +280,7 @@ void start_epoll_server(const char* port) {
     }
 
     LOG_INFO("Initiating graceful shutdown sequence...");
+    thread_pool_destroy(global_pool);
     free(server_ctx);
     close(server_fd);
     close(epoll_fd);
