@@ -18,6 +18,7 @@
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 
 #define MAX_EVENTS 64
@@ -44,26 +45,35 @@ static void set_non_blocking(int fd) {
     }
 }
 
+// Optimized send_response with Buffer Coalescing and Small Buffer Optimization (SBO)
 static void send_response(int fd, uint8_t type, const uint8_t* payload, uint32_t payload_len) {
     PacketHeader header;
     header.type = type;
     header.sequence_number = 0;
     header.payload_length = payload_len;
 
-    uint8_t header_buffer[sizeof(PacketHeader)];
-    serialize_header(&header, header_buffer);
+    size_t total_len = sizeof(PacketHeader) + payload_len;
+    uint8_t stack_buf[512];
+    uint8_t* full_buffer = stack_buf;
 
-    ssize_t sent = send(fd, header_buffer, sizeof(header_buffer), 0);
-    if (sent == -1) {
-        LOG_ERROR("Failed to send response header: %s", strerror(errno));
-        return;
+    // Fallback to heap only if the payload is unusually large
+    if (total_len > sizeof(stack_buf)) {
+        full_buffer = (uint8_t*)malloc(total_len);
+        if (!full_buffer) return;
     }
 
+    serialize_header(&header, full_buffer);
     if (payload_len > 0 && payload != NULL) {
-        sent = send(fd, payload, payload_len, 0);
-        if (sent == -1) {
-            LOG_ERROR("Failed to send response payload: %s", strerror(errno));
-        }
+        memcpy(full_buffer + sizeof(PacketHeader), payload, payload_len);
+    }
+
+    ssize_t sent = send(fd, full_buffer, total_len, 0);
+    if (sent == -1) {
+        LOG_ERROR("Failed to send coalesced response: %s", strerror(errno));
+    }
+
+    if (full_buffer != stack_buf) {
+        free(full_buffer);
     }
 }
 
@@ -72,7 +82,7 @@ static void execute_command_task(void* arg) {
 
     switch (task->type) {
     case CMD_ECHO:
-        LOG_INFO("Executing ECHO command in worker thread.");
+        LOG_DEBUG("Executing ECHO command in worker thread.");
         send_response(task->fd, CMD_ECHO, task->payload, task->payload_len);
         break;
     default:
@@ -103,7 +113,7 @@ static void handle_client_data(ClientContext* ctx) {
                 return;
             }
             else if (bytes_read == 0) {
-                LOG_INFO("Client fd %d disconnected during header read.", ctx->fd);
+                LOG_DEBUG("Client fd %d disconnected during header read.", ctx->fd);
                 close(ctx->fd);
                 free_client_context(ctx);
                 free(ctx);
@@ -156,7 +166,7 @@ static void handle_client_data(ClientContext* ctx) {
                 return;
             }
             else if (bytes_read == 0) {
-                LOG_INFO("Client fd %d disconnected during payload read.", ctx->fd);
+                LOG_DEBUG("Client fd %d disconnected during payload read.", ctx->fd);
                 close(ctx->fd);
                 free_client_context(ctx);
                 free(ctx);
@@ -166,7 +176,7 @@ static void handle_client_data(ClientContext* ctx) {
             ctx->payload_bytes_read += bytes_read;
 
             if (ctx->payload_bytes_read == ctx->expected_payload_length) {
-                LOG_INFO("Dispatching command type: %d to thread pool", ctx->message_type);
+                LOG_DEBUG("Dispatching command type: %d to thread pool", ctx->message_type);
 
                 CommandTask* task = (CommandTask*)malloc(sizeof(CommandTask));
                 if (task != NULL) {
@@ -258,9 +268,15 @@ void start_epoll_server(const char* port) {
                         }
                     }
 
+                    // Disable Nagle's algorithm for low latency
+                    int flag = 1;
+                    if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(int)) == -1) {
+                        LOG_WARN("Failed to set TCP_NODELAY on client socket.");
+                    }
+
                     char client_ip[INET_ADDRSTRLEN];
                     inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
-                    LOG_INFO("Accepted connection from %s:%d (fd: %d).", client_ip, ntohs(client_addr.sin_port), client_fd);
+                    LOG_DEBUG("Accepted connection from %s:%d (fd: %d).", client_ip, ntohs(client_addr.sin_port), client_fd);
 
                     set_non_blocking(client_fd);
 
